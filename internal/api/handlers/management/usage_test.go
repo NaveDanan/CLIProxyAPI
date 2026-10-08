@@ -1,14 +1,55 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/copilotusage"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 )
+
+func TestGetCopilotUsageCustomRange(t *testing.T) {
+	store := copilotusage.NewStore(filepath.Join(t.TempDir(), "usage.jsonl"))
+	for _, day := range []int{1, 2, 3} {
+		store.HandleUsage(context.Background(), usage.Record{
+			Provider: "github-copilot", Model: "gpt-5.4", RequestedAt: time.Date(2026, 10, day, 12, 0, 0, 0, time.UTC),
+			Detail: usage.Detail{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+		})
+	}
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v8/management/observability/usage/copilot?period=custom&start=2026-10-02&end=2026-10-03", nil)
+	(&Handler{copilotUsage: store}).GetCopilotUsage(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var summary copilotusage.Summary
+	if err := json.Unmarshal(rec.Body.Bytes(), &summary); err != nil {
+		t.Fatal(err)
+	}
+	if len(summary.ByModel) != 1 || summary.ByModel[0].Requests != 2 || len(summary.Days) != 2 {
+		t.Fatalf("custom date inclusion: %+v", summary)
+	}
+}
+
+func TestGetCopilotUsageRejectsInvalidRange(t *testing.T) {
+	for _, query := range []string{"period=custom&start=2026-10-03&end=2026-10-02", "period=custom&start=bad&end=2026-10-03", "period=unknown"} {
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/v8/management/observability/usage/copilot?"+query, nil)
+		(&Handler{copilotUsage: copilotusage.NewStore(filepath.Join(t.TempDir(), "usage.jsonl"))}).GetCopilotUsage(ctx)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("query %q returned %d", query, rec.Code)
+		}
+	}
+}
 
 func TestGetUsageQueuePopsRequestedRecords(t *testing.T) {
 	withManagementUsageQueue(t, func() {

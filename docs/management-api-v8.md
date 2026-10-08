@@ -98,6 +98,7 @@ retain the corresponding business operation's fields.
 | `/observability/logs/requests/<id>` | GET | Get a request log. |
 | `/observability/usage/api-keys` | GET | Get API-key usage. |
 | `/observability/usage/queue` | GET | Get queued usage events. |
+| `/observability/usage/copilot` | GET | Get Copilot request, token, and estimated cost history by model and UTC day. |
 | `/credentials` | GET, POST, DELETE | List, upload, or delete credential files. |
 | `/credentials/models` | GET | Get credential models. |
 | `/credentials/download` | GET | Download a credential file. |
@@ -114,6 +115,23 @@ retain the corresponding business operation's fields.
 | `/plugins/store` | GET | List the plugin store. |
 | `/plugins/store/<id>/install` | POST | Install or update a plugin. |
 | `/plugins/<id>/quota` | GET, POST, DELETE | Read, fetch, or reset plugin quota. |
+
+### Copilot usage history
+
+`GET /v8/management/observability/usage/copilot?period=today` accepts
+`today`, `this_week` (Monday through Sunday), and `this_month`. For an
+inclusive custom UTC date range, use `period=custom&start=2026-10-01&end=2026-10-03`.
+The response includes `start` and exclusive `end` timestamps, `by_model` totals,
+and `days` with `by_model` totals. Each model reports request and token counts,
+`cost_usd`, `ai_credits`, and `unpriced_requests`.
+
+Only GitHub Copilot requests handled by this proxy after the feature is enabled
+are recorded. History is stored in `copilot-usage.jsonl` next to the server
+configuration file. Cost is an estimate using the published per-token rates
+snapshotted with each event, not a GitHub invoice. Unrecognized models or
+requests without complete token accounting remain in request and token totals
+but contribute no cost and increment `unpriced_requests`. One AI credit is
+$0.01 USD. Pricing reference: [Models and pricing for GitHub Copilot](https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing).
 
 ## OAuth
 

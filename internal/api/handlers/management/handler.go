@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/copilotusage"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginstore"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
@@ -61,6 +62,7 @@ type Handler struct {
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
 	pluginStoreRateLimiter  *pluginstore.GitHubRateLimiter
 	pluginReleases          pluginReleaseCache
+	copilotUsage            *copilotusage.Store
 }
 
 type configReloadSnapshot struct {
@@ -149,6 +151,10 @@ func (h *Handler) SetPluginHost(host *pluginhost.Host) {
 	h.mu.Lock()
 	h.pluginHost = host
 	h.mu.Unlock()
+}
+
+func (h *Handler) SetCopilotUsageStore(store *copilotusage.Store) {
+	h.copilotUsage = store
 }
 
 // SetConfigReloadHook updates the callback used after management saves config changes.
