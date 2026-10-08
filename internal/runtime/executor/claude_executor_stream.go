@@ -252,6 +252,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body = normalizeCacheControlTTL(body)
 
 	// Extract betas from body and convert to header
+	// Same-format translation preserves the caller body. The streaming method
+	// must request SSE even when stream is omitted or changed by a payload rule.
+	body = helps.SetBoolIfDifferent(body, "stream", true)
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
 	bodyForTranslation := body
@@ -426,6 +429,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 			for scanner.Scan() {
 				line := scanner.Bytes()
+				if status, payload, failed := helps.ClaudeStreamError(line); failed {
+					emitResponseError(classifyClaudeUpstreamErrorWithCooling(status, httpResp.Header, payload, e.modelLevelCooling()))
+					return
+				}
 				observeClaudeStreamLine(line, &upstreamMessageID, &upstreamCompleted)
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 				reporter.ObserveResponseModel(line)
@@ -466,6 +473,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					}
 					return
 				}
+				emitResponseError(statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before message_stop"})
+				return
 			}
 			if upstreamCompleted {
 				commitClaudeContinuity(diagnosticsState, upstreamMessageID, helps.HeaderValueCaseInsensitive(httpResp.Header, "request-id"))
@@ -482,6 +491,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		upstreamCompleted := false
 		for scanner.Scan() {
 			line := scanner.Bytes()
+			if status, payload, failed := helps.ClaudeStreamError(line); failed {
+				emitResponseError(classifyClaudeUpstreamErrorWithCooling(status, httpResp.Header, payload, e.modelLevelCooling()))
+				return
+			}
 			observeClaudeStreamLine(line, &upstreamMessageID, &upstreamCompleted)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			reporter.ObserveResponseModel(line)
@@ -540,6 +553,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				}
 				return
 			}
+			emitResponseError(statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before message_stop"})
+			return
 		}
 		if upstreamCompleted {
 			commitClaudeContinuity(diagnosticsState, upstreamMessageID, helps.HeaderValueCaseInsensitive(httpResp.Header, "request-id"))

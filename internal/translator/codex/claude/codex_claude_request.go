@@ -45,6 +45,16 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	return convertClaudeRequestToCodex(modelName, inputRawJSON, stream, false)
 }
 
+// ConvertClaudeRequestToOpenAIResponses uses the shared item conversion while honoring HTTP request limits.
+func ConvertClaudeRequestToOpenAIResponses(modelName string, inputRawJSON []byte, stream bool) []byte {
+	body := ConvertClaudeRequestToCodex(modelName, inputRawJSON, stream)
+	body, _ = sjson.SetBytes(body, "stream", stream)
+	if maxTokens := gjson.GetBytes(inputRawJSON, "max_tokens"); maxTokens.Exists() {
+		body, _ = sjson.SetRawBytes(body, "max_output_tokens", []byte(maxTokens.Raw))
+	}
+	return body
+}
+
 // ConvertClaudeRequestToCodexWithCompat preserves assistant thinking blocks with
 // empty or unknown-format signatures for configured compatibility endpoints.
 func ConvertClaudeRequestToCodexWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {

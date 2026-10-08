@@ -40,9 +40,11 @@ const (
 // It performs request/response translation and executes against the provider base URL
 // using per-auth credentials (API key) and per-auth HTTP transport (proxy) from context.
 type OpenAICompatExecutor struct {
-	provider       string
-	cfg            *config.Config
-	upstreamFormat sdktranslator.Format
+	provider              string
+	cfg                   *config.Config
+	upstreamFormat        sdktranslator.Format
+	upstreamModel         string
+	requireStreamTerminal bool
 }
 
 // NewOpenAICompatExecutor creates an executor bound to a provider key (e.g., "openrouter").
@@ -117,6 +119,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	originalPayload := originalPayloadSource
 	isCompat := helps.APIKeyModelIsCompat(req)
 	originalTranslated, translated, updatesChanged := helps.TranslateRequestPairWithAPIKeyModelCompatibilityAndUpdateIntent(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, opts.Stream, isCompat)
+	if e.upstreamModel != "" {
+		translated = helps.SetStringIfDifferent(translated, "model", e.upstreamModel)
+		reporter.SetUpstreamModel(e.upstreamModel)
+	}
 
 	translated, err = helps.ApplyRequestThinking(translated, req, opts, from.String(), to.String(), e.Identifier(), updatesChanged)
 	if err != nil {
@@ -337,6 +343,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	originalPayload := originalPayloadSource
 	isCompat := helps.APIKeyModelIsCompat(req)
 	originalTranslated, translated, updatesChanged := helps.TranslateRequestPairWithAPIKeyModelCompatibilityAndUpdateIntent(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, true, isCompat)
+	if e.upstreamModel != "" {
+		translated = helps.SetStringIfDifferent(translated, "model", e.upstreamModel)
+		reporter.SetUpstreamModel(e.upstreamModel)
+	}
 
 	translated, err = helps.ApplyRequestThinking(translated, req, opts, from.String(), to.String(), e.Identifier(), updatesChanged)
 	if err != nil {
@@ -433,10 +443,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, &param)
 		var streamUsage helps.StreamUsageBuffer
 		var seenDone bool
+		var seenFinishReason bool
 		var streamFailed bool
 		var streamAborted bool
 		var upstreamEvent string
 		var frameData [][]byte
+		var pendingClaudeCompletion [][]byte
+		deferClaudeCompletion := e.requireStreamTerminal && to == sdktranslator.FormatOpenAI && responseFormat == sdktranslator.FormatClaude
 		defer streamUsage.Publish(ctx, reporter)
 
 		publishStreamError := func(streamErr statusErr, containsPayload bool) {
@@ -476,6 +489,14 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 			dataPayload := bytes.TrimSpace(bytes.Join(dataLines, []byte("\n")))
 			isDone := bytes.Equal(dataPayload, []byte("[DONE]"))
+			if isDone && to == sdktranslator.FormatOpenAIResponse {
+				publishStreamError(statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before a terminal Responses event"}, false)
+				return true
+			}
+			if isDone && e.requireStreamTerminal && to == sdktranslator.FormatOpenAI && !seenFinishReason {
+				publishStreamError(statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before finish_reason"}, false)
+				return true
+			}
 			if isDone && openAICompatErrorEvent(eventName) {
 				publishStreamError(statusErr{code: http.StatusBadGateway, msg: "upstream error event ended before [DONE]"}, false)
 				return true
@@ -495,21 +516,36 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				streamUsage.Observe(helps.ParseCodexUsage(dataPayload))
 			}
 			eventType := gjson.GetBytes(dataPayload, "type").String()
+			if to == sdktranslator.FormatOpenAI && gjson.GetBytes(dataPayload, "choices.0.finish_reason").String() != "" {
+				seenFinishReason = true
+			}
 			terminal := isDone || (to == sdktranslator.FormatOpenAIResponse && (eventType == "response.completed" || eventType == "response.incomplete"))
 			streamLine := append([]byte("data: "), dataPayload...)
 			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, streamLine, &param, claudeInputTokens)
 			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+			if helps.ApplyPatchTranslationError(param) != nil {
+				publishStreamError(statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}, false)
+				return true
+			}
+			if isDone && len(pendingClaudeCompletion) > 0 {
+				chunks = append(pendingClaudeCompletion, chunks...)
+				pendingClaudeCompletion = nil
+			}
 			for i := range chunks {
+				// Usage chunks can make the Claude translator finalize before [DONE].
+				// Hold those events until the Copilot terminal checks have passed.
+				if deferClaudeCompletion && !isDone && (len(pendingClaudeCompletion) > 0 ||
+					bytes.Contains(chunks[i], []byte("event: message_delta\n")) ||
+					bytes.Contains(chunks[i], []byte("event: message_stop\n"))) {
+					pendingClaudeCompletion = append(pendingClaudeCompletion, chunks[i])
+					continue
+				}
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
 				case <-ctx.Done():
 					streamAborted = true
 					return true
 				}
-			}
-			if helps.ApplyPatchTranslationError(param) != nil {
-				publishStreamError(statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}, false)
-				return true
 			}
 			if terminal {
 				seenDone = true
@@ -569,7 +605,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		} else if !seenDone {
 			// Responses clients require an explicit terminal event. Treat a clean
 			// upstream EOF without [DONE] as a failed stream instead of completing it.
-			if responseFormat == sdktranslator.FormatOpenAIResponse || to == sdktranslator.FormatOpenAIResponse {
+			if e.requireStreamTerminal || responseFormat == sdktranslator.FormatOpenAIResponse || to == sdktranslator.FormatOpenAIResponse {
 				streamErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before [DONE]"}
 				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 				reporter.PublishFailure(ctx, streamErr)

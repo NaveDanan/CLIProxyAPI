@@ -354,11 +354,16 @@ func ConvertCodexResponseToClaudeNonStream(_ context.Context, _ string, original
 
 	rootResult := gjson.ParseBytes(rawJSON)
 	typeStr := rootResult.Get("type").String()
+	responseData := rootResult.Get("response")
 	if typeStr != "response.completed" && typeStr != "response.incomplete" {
-		return []byte{}
+		// HTTP Responses returns the response object directly; Codex wraps its terminal event.
+		status := rootResult.Get("status").String()
+		if typeStr != "" || !rootResult.Get("output").IsArray() || (status != "completed" && status != "incomplete") {
+			return []byte{}
+		}
+		responseData = rootResult
 	}
 
-	responseData := rootResult.Get("response")
 	if !responseData.Exists() {
 		return []byte{}
 	}
@@ -501,6 +506,16 @@ func codexStopReason(responseData gjson.Result) string {
 }
 
 func mapCodexStopReasonToClaude(stopReason string, hasToolCall bool) string {
+	// A tool block can be present when generation is truncated or refused.
+	// Preserve that terminal reason so clients can recover instead of executing a partial call.
+	switch stopReason {
+	case "max_tokens", "max_output_tokens":
+		return "max_tokens"
+	case "content_filter", "refusal":
+		return "refusal"
+	case "model_context_window_exceeded":
+		return "model_context_window_exceeded"
+	}
 	if hasToolCall {
 		return "tool_use"
 	}

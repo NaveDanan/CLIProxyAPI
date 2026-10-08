@@ -261,3 +261,16 @@ func TestModelDiscoveryCapabilitiesAndEndpoints(t *testing.T) {
 		}
 	}
 }
+
+func TestModelDiscoveryPrefersNativeCodingProtocols(t *testing.T) {
+	for _, tc := range []struct{ id, vendor, want string }{
+		{"claude-sonnet-5.1", "Anthropic", "/v1/messages"},
+		{"gpt-5.1", "OpenAI", "/responses"},
+	} {
+		m := Model{ID: tc.id, Vendor: tc.vendor, SupportedEndpoints: []string{"/chat/completions", "/responses", "/v1/messages"}}
+		m.Capabilities.Type = "chat"
+		if got := m.ModelInfo().UpstreamEndpoint; got != tc.want {
+			t.Errorf("%s endpoint = %s, want %s", tc.id, got, tc.want)
+		}
+	}
+}

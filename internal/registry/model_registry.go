@@ -36,6 +36,8 @@ type NativeCapabilities struct {
 type ModelInfo struct {
 	// UpstreamEndpoint selects the provider protocol for dynamically discovered models.
 	UpstreamEndpoint string `json:"-"`
+	// UpstreamModelName preserves the provider ID behind an automatically named model alias.
+	UpstreamModelName string `json:"-"`
 	// ID is the unique identifier for the model
 	ID string `json:"id"`
 	// MetadataModelID identifies the canonical model used to resolve client metadata.

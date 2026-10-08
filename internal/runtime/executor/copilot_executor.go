@@ -33,7 +33,7 @@ func (e *CopilotExecutor) RequestToFormat(req exec.Request, opts exec.Options) t
 	return e.requestToFormatForClient(authID, req, opts)
 }
 
-func (*CopilotExecutor) requestToFormatForClient(authID string, req exec.Request, opts exec.Options) translator.Format {
+func copilotModelForClient(authID string, req exec.Request, opts exec.Options) *registry.ModelInfo {
 	r := registry.GetGlobalRegistry()
 	// The registry contains public aliases and prefixes, while req.Model has
 	// already been resolved to the upstream name by the scheduler.
@@ -42,6 +42,11 @@ func (*CopilotExecutor) requestToFormatForClient(authID string, req exec.Request
 	if model == nil {
 		model = r.GetModelForClient(authID, thinking.ParseSuffix(req.Model).ModelName)
 	}
+	return model
+}
+
+func (*CopilotExecutor) requestToFormatForClient(authID string, req exec.Request, opts exec.Options) translator.Format {
+	model := copilotModelForClient(authID, req, opts)
 	if model != nil {
 		switch model.UpstreamEndpoint {
 		case "/responses":
@@ -61,11 +66,11 @@ func (e *CopilotExecutor) Models(ctx context.Context, auth *coreauth.Auth) ([]*r
 	return copilot.NewClient(e.cfg, auth.ProxyURL).Models(ctx, token)
 }
 
-func (e *CopilotExecutor) preparedAuth(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+func (e *CopilotExecutor) preparedAuth(ctx context.Context, auth *coreauth.Auth, force bool) (*coreauth.Auth, error) {
 	if auth == nil {
 		return nil, fmt.Errorf("github-copilot: missing credential")
 	}
-	token, err := e.copilotToken(ctx, auth, false)
+	token, err := e.copilotToken(ctx, auth, force)
 	if err != nil {
 		return nil, err
 	}
@@ -89,21 +94,36 @@ func (e *CopilotExecutor) preparedAuth(ctx context.Context, auth *coreauth.Auth)
 
 func (e *CopilotExecutor) delegate(auth *coreauth.Auth, req exec.Request, opts exec.Options) coreauth.ProviderExecutor {
 	format := e.requestToFormatForClient(auth.ID, req, opts)
-	if format == translator.FormatClaude {
-		return &ClaudeExecutor{cfg: e.cfg, provider: copilot.Provider, requestLogProvider: copilot.Provider}
+	upstreamModel := ""
+	if model := copilotModelForClient(auth.ID, req, opts); model != nil {
+		upstreamModel = model.UpstreamModelName
 	}
-	return &OpenAICompatExecutor{provider: copilot.Provider, cfg: e.cfg, upstreamFormat: format}
+	if format == translator.FormatClaude {
+		delegate := &ClaudeExecutor{cfg: e.cfg, provider: copilot.Provider, requestLogProvider: copilot.Provider}
+		if upstreamModel != "" {
+			delegate.upstreamModelNormalizer = func(string) string { return upstreamModel }
+		}
+		return delegate
+	}
+	return &OpenAICompatExecutor{provider: copilot.Provider, cfg: e.cfg, upstreamFormat: format, upstreamModel: upstreamModel, requireStreamTerminal: true}
 }
 
 func (e *CopilotExecutor) Execute(ctx context.Context, auth *coreauth.Auth, req exec.Request, opts exec.Options) (exec.Response, error) {
 	if opts.Alt == "responses/compact" || openAICompatImageEndpointPath(opts) != "" {
 		return exec.Response{}, statusErr{code: http.StatusNotImplemented, msg: "github-copilot: endpoint is not supported"}
 	}
-	prepared, err := e.preparedAuth(ctx, auth)
+	prepared, err := e.preparedAuth(ctx, auth, false)
 	if err != nil {
 		return exec.Response{}, err
 	}
 	response, err := e.delegate(auth, req, opts).Execute(ctx, prepared, req, opts)
+	if ctx.Err() == nil && helps.CopilotTokenRejected(err) {
+		prepared, err = e.preparedAuth(ctx, auth, true)
+		if err != nil {
+			return exec.Response{}, err
+		}
+		response, err = e.delegate(auth, req, opts).Execute(ctx, prepared, req, opts)
+	}
 	return response, helps.CopilotQuotaError(err)
 }
 
@@ -111,11 +131,19 @@ func (e *CopilotExecutor) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 	if opts.Alt == "responses/compact" || openAICompatImageEndpointPath(opts) != "" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "github-copilot: endpoint is not supported"}
 	}
-	prepared, err := e.preparedAuth(ctx, auth)
+	prepared, err := e.preparedAuth(ctx, auth, false)
 	if err != nil {
 		return nil, err
 	}
 	response, err := e.delegate(auth, req, opts).ExecuteStream(ctx, prepared, req, opts)
+	// HTTP rejection occurs before any stream bytes are exposed to the client.
+	if ctx.Err() == nil && helps.CopilotTokenRejected(err) {
+		prepared, err = e.preparedAuth(ctx, auth, true)
+		if err != nil {
+			return nil, err
+		}
+		response, err = e.delegate(auth, req, opts).ExecuteStream(ctx, prepared, req, opts)
+	}
 	return response, helps.CopilotQuotaError(err)
 }
 
@@ -160,7 +188,7 @@ func (e *CopilotExecutor) PrepareRequest(req *http.Request, auth *coreauth.Auth)
 	if req == nil {
 		return nil
 	}
-	prepared, err := e.preparedAuth(req.Context(), auth)
+	prepared, err := e.preparedAuth(req.Context(), auth, false)
 	if err != nil {
 		return err
 	}

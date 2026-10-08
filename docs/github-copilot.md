@@ -18,7 +18,11 @@ Credentials are saved in the configured auth directory. Signing into the same Gi
 
 ## Models and requests
 
-The provider key is `github-copilot`. Model discovery uses the account's Copilot model catalog instead of a hard-coded list. Only chat models with a supported HTTP endpoint are registered. The executor chooses Chat Completions, Responses, or Messages according to the model's advertised endpoints, then reuses the existing protocol translators and usage accounting.
+The provider key is `github-copilot`. Model discovery uses the account's Copilot model catalog instead of a hard-coded list. Only chat models with a supported HTTP endpoint are registered. Anthropic models prefer Messages when advertised; other models prefer Responses when advertised, with Chat Completions as a fallback. The executor reuses the existing protocol translators and usage accounting.
+
+Claude models also receive Anthropic-compatible aliases, such as `claude-sonnet-5-1` for Copilot's `claude-sonnet-5.1`. Both names remain callable, and the executor sends Copilot's original ID upstream. Account prefixes and configured aliases preserve this mapping. OpenAI IDs retain their dotted version spelling.
+
+Copilot streams require explicit completion. Truncated Messages streams, Chat Completions without a finish reason and `[DONE]`, and Responses without a terminal response event return an error instead of a successful turn. A rejected short-lived inference token triggers one refresh and retry before any stream bytes reach the client. See the [Copilot compatibility audit](copilot-compatibility-audit.md) for findings, tests, and remaining limits.
 
 Existing OAuth model aliases, excluded models, and account prefixes also apply. Use `/v1/models` to find the models available to the connected account. Image generation, Responses compaction, and models available only over WebSocket are not advertised as supported.
 

@@ -159,6 +159,8 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			return
 		}
 		models = applyExcludedModels(models, excluded)
+		models = applyCopilotModelNames(models)
+		models = applyExcludedModels(models, excluded)
 	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		models = registry.GetKimiModels()
 		models = applyExcludedModels(models, excluded)

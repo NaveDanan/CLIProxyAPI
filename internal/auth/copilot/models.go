@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
@@ -38,10 +39,14 @@ func (m Model) ModelInfo() *registry.ModelInfo {
 		return nil
 	}
 	endpoint := "/chat/completions"
-	if len(m.SupportedEndpoints) > 0 && !slices.Contains(m.SupportedEndpoints, endpoint) {
+	if len(m.SupportedEndpoints) > 0 {
 		switch {
+		case (strings.EqualFold(m.Vendor, "Anthropic") || strings.HasPrefix(m.ID, "claude-")) && slices.Contains(m.SupportedEndpoints, "/v1/messages"):
+			endpoint = "/v1/messages"
 		case slices.Contains(m.SupportedEndpoints, "/responses"):
 			endpoint = "/responses"
+		case slices.Contains(m.SupportedEndpoints, "/chat/completions"):
+			endpoint = "/chat/completions"
 		case slices.Contains(m.SupportedEndpoints, "/v1/messages"):
 			endpoint = "/v1/messages"
 		default:

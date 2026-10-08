@@ -45,3 +45,17 @@ func TestCopilotCatalogFailurePreservesRegistration(t *testing.T) {
 		})
 	}
 }
+
+func TestCopilotModelNamesPreserveUpstreamAndExplicitIDs(t *testing.T) {
+	models := []*ModelInfo{{ID: "claude-sonnet-5.1", OwnedBy: "Anthropic", UpstreamEndpoint: "/v1/messages"}, {ID: "gpt-5.1", OwnedBy: "OpenAI"}}
+	got := applyCopilotModelNames(models)
+	if len(got) != 3 || got[0].ID != "claude-sonnet-5.1" || got[1].ID != "gpt-5.1" || got[2].ID != "claude-sonnet-5-1" || got[2].UpstreamModelName != "claude-sonnet-5.1" || got[2].UpstreamEndpoint != "/v1/messages" {
+		t.Fatalf("incorrect Claude alias: %+v", got)
+	}
+	if models[0].ID != "claude-sonnet-5.1" {
+		t.Fatal("mutated source catalog")
+	}
+	if repeated := applyCopilotModelNames(got); len(repeated) != len(got) {
+		t.Fatal("duplicated canonical alias")
+	}
+}

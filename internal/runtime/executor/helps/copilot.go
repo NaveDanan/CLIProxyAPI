@@ -20,3 +20,9 @@ func CopilotQuotaError(err error) error {
 	}
 	return err
 }
+
+// Only a rejected inference token can be retried by refreshing Copilot credentials.
+func CopilotTokenRejected(err error) bool {
+	var status interface{ StatusCode() int }
+	return errors.As(err, &status) && status.StatusCode() == http.StatusUnauthorized
+}
