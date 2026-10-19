@@ -19,13 +19,14 @@ import (
 )
 
 type Event struct {
-	At           time.Time `json:"at"`
-	Model        string    `json:"model"`
-	InputTokens  int64     `json:"input_tokens"`
-	OutputTokens int64     `json:"output_tokens"`
-	TotalTokens  int64     `json:"total_tokens"`
-	Failed       bool      `json:"failed"`
-	CostNanos    *int64    `json:"cost_nanos,omitempty"`
+	At             time.Time            `json:"at"`
+	Model          string               `json:"model"`
+	InputTokens    int64                `json:"input_tokens"`
+	OutputTokens   int64                `json:"output_tokens"`
+	TotalTokens    int64                `json:"total_tokens"`
+	Failed         bool                 `json:"failed"`
+	CostNanos      *int64               `json:"cost_nanos,omitempty"`
+	TokenBreakdown usage.TokenBreakdown `json:"token_breakdown,omitempty"`
 }
 
 type ModelSummary struct {
@@ -50,14 +51,18 @@ type Summary struct {
 	End     time.Time      `json:"end"`
 	ByModel []ModelSummary `json:"by_model"`
 	Days    []Day          `json:"days"`
+	Pricing PricingStatus  `json:"pricing"`
 }
 
 type Store struct {
-	mu   sync.Mutex
-	path string
+	mu      sync.Mutex
+	path    string
+	pricing *pricingCatalog
 }
 
-func NewStore(path string) *Store { return &Store{path: path} }
+func NewStore(path string) *Store {
+	return &Store{path: path, pricing: newPricingCatalog(path + ".pricing.json")}
+}
 
 func (s *Store) HandleUsage(_ context.Context, record usage.Record) {
 	if s == nil || record.Provider != copilot.Provider || !usage.GenerateEnabled(record.Generate) {
@@ -77,9 +82,10 @@ func (s *Store) HandleUsage(_ context.Context, record usage.Record) {
 	event := Event{
 		At: at.UTC(), Model: model, InputTokens: record.Detail.InputTokens,
 		OutputTokens: record.Detail.OutputTokens, TotalTokens: record.Detail.TotalTokens,
-		Failed: record.Failed,
+		Failed: record.Failed, TokenBreakdown: record.Detail.TokenBreakdown,
 	}
-	event.CostNanos = estimatedCost(model, record.Detail)
+	rates, _ := s.pricing.snapshot()
+	event.CostNanos = estimatedCost(rates, model, record.Detail)
 	if err := s.append(event); err != nil {
 		log.WithError(err).Error("github-copilot: failed to save usage")
 	}
@@ -111,6 +117,8 @@ func (s *Store) Summary(start, end time.Time) (Summary, error) {
 	if s == nil || !start.Before(end) {
 		return result, fmt.Errorf("usage range must have start before end")
 	}
+	rates, status := s.pricing.snapshot()
+	result.Pricing = status
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	file, err := os.Open(s.path)
@@ -137,6 +145,11 @@ func (s *Store) Summary(start, end time.Time) (Summary, error) {
 		}
 		if event.At.Before(start) || !event.At.Before(end) {
 			continue
+		}
+		// New records retain cache buckets so every refresh can reprice history.
+		// Legacy records keep their recorded estimate when cache details are absent.
+		if event.TokenBreakdown.SchemaVersion != 0 {
+			event.CostNanos = estimatedCost(rates, event.Model, usage.Detail{TotalTokens: event.TotalTokens, TokenBreakdown: event.TokenBreakdown})
 		}
 		model := models[event.Model]
 		models[event.Model] = add(model, event)

@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
+	log "github.com/sirupsen/logrus"
 )
 
 type usageQueueRecord []byte
@@ -84,6 +85,11 @@ func (h *Handler) GetCopilotUsage(c *gin.Context) {
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "period must be today, this_week, this_month, or custom"})
 		return
+	}
+	if c.Query("refresh_pricing") == "true" {
+		if errRefresh := h.copilotUsage.RefreshPricing(c.Request.Context()); errRefresh != nil {
+			log.WithError(errRefresh).Warn("github-copilot: pricing refresh failed; keeping cached prices")
+		}
 	}
 	summary, err := h.copilotUsage.Summary(start, end)
 	if err != nil {

@@ -491,3 +491,151 @@ data: {"type":"response.completed","response":{"id":"resp-1","model":"test-model
 		}
 	}
 }
+
+// TestCopilotTextIsDeliveredOnceAcrossCodingClients checks the actual executor
+// boundary used by Codex and Claude Code, including repeated legitimate tokens.
+func TestCopilotTextIsDeliveredOnceAcrossCodingClients(t *testing.T) {
+	const want = "ha ha done"
+	streams := map[string]string{
+		"/chat/completions": `data: {"id":"chat-text","choices":[{"index":0,"delta":{"content":"ha "},"finish_reason":null}]}
+
+data: {"id":"chat-text","choices":[{"index":0,"delta":{"content":"ha "},"finish_reason":null}]}
+
+data: {"id":"chat-text","choices":[{"index":0,"delta":{"content":"done"},"finish_reason":null}]}
+
+data: {"id":"chat-text","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+`,
+		"/v1/messages": `event: message_start
+data: {"type":"message_start","message":{"id":"msg-1","role":"assistant","model":"test-model","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ha "}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ha "}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`,
+		"/responses": `data: {"type":"response.created","response":{"id":"resp-text","model":"test-model","status":"in_progress","output":[]}}
+
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg-2","type":"message","role":"assistant","content":[]}}
+
+data: {"type":"response.content_part.added","item_id":"msg-3","output_index":0,"content_index":0,"part":{"type":"output_text","text":""}}
+
+data: {"type":"response.output_text.delta","item_id":"msg-4","output_index":0,"content_index":0,"delta":"ha "}
+
+data: {"type":"response.output_text.delta","item_id":"msg-5","output_index":0,"content_index":0,"delta":"ha "}
+
+data: {"type":"response.output_text.delta","item_id":"msg-6","output_index":0,"content_index":0,"delta":"done"}
+
+data: {"type":"response.output_text.done","item_id":"msg-7","output_index":0,"content_index":0,"text":"ha ha done"}
+
+data: {"type":"response.content_part.done","item_id":"msg-8","output_index":0,"content_index":0,"part":{"type":"output_text","text":"ha ha done"}}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg-9","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ha ha done"}]}}
+
+data: {"type":"response.completed","response":{"id":"resp-text","status":"completed","output":[{"id":"msg-10","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ha ha done"}]}]}}
+
+`,
+	}
+	for _, format := range []translator.Format{translator.FormatOpenAIResponse, translator.FormatClaude} {
+		for endpoint, fixture := range streams {
+			t.Run(format.String()+endpoint, func(t *testing.T) {
+				e, auth := newTestCopilot()
+				registry.GetGlobalRegistry().RegisterClient(auth.ID, copilot.Provider, []*registry.ModelInfo{{ID: "test-model", UpstreamEndpoint: endpoint}})
+				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+				requests := 0
+				ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", copilotRoundTripper(func(*http.Request) (*http.Response, error) {
+					requests++
+					return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(fixture))}, nil
+				}))
+				payload := []byte(`{"model":"test-model","input":"hello","stream":true}`)
+				if format == translator.FormatClaude {
+					payload = []byte(`{"model":"test-model","max_tokens":64,"messages":[{"role":"user","content":"hello"}],"stream":true}`)
+				}
+				result, err := e.ExecuteStream(ctx, auth, exec.Request{Model: "test-model", Payload: payload}, exec.Options{SourceFormat: format, OriginalRequest: payload, Stream: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var wire strings.Builder
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatal(chunk.Err)
+					}
+					wire.Write(chunk.Payload)
+					wire.WriteByte('\n')
+				}
+				var text strings.Builder
+				added, done, terminals := 0, 0, 0
+				itemID := ""
+				for _, line := range strings.Split(wire.String(), "\n") {
+					if !strings.HasPrefix(line, "data:") {
+						continue
+					}
+					event := gjson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+					switch event.Get("type").String() {
+					case "response.output_item.added":
+						if event.Get("item.type").String() == "message" {
+							added++
+							itemID = event.Get("item.id").String()
+						}
+					case "response.output_text.delta":
+						if event.Get("item_id").String() != itemID {
+							t.Errorf("delta changed message identity")
+						}
+						text.WriteString(event.Get("delta").String())
+					case "response.output_item.done":
+						if event.Get("item.type").String() == "message" {
+							done++
+							if event.Get("item.id").String() != itemID {
+								t.Errorf("completion changed message identity")
+							}
+							if event.Get("item.content.0.text").String() != want {
+								t.Errorf("wrong final message: %s", event.Raw)
+							}
+						}
+					case "response.completed":
+						terminals++
+						output := event.Get("response.output").Array()
+						if len(output) != 1 || output[0].Get("id").String() != itemID || output[0].Get("content.0.text").String() != want {
+							t.Errorf("duplicated or changed final output: %s", event.Raw)
+						}
+					case "content_block_start":
+						if event.Get("content_block.type").String() == "text" {
+							added++
+							text.WriteString(event.Get("content_block.text").String())
+						}
+					case "content_block_delta":
+						if event.Get("delta.type").String() == "text_delta" {
+							text.WriteString(event.Get("delta.text").String())
+						}
+					case "content_block_stop":
+						done++
+					case "message_stop":
+						terminals++
+					}
+				}
+				if text.String() != want || added != 1 || done != 1 || terminals != 1 || requests != 1 {
+					t.Fatalf("text=%q added=%d done=%d terminals=%d requests=%d; wire=%s", text.String(), added, done, terminals, requests, wire.String())
+				}
+			})
+		}
+	}
+}

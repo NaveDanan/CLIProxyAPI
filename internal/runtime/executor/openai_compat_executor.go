@@ -40,11 +40,12 @@ const (
 // It performs request/response translation and executes against the provider base URL
 // using per-auth credentials (API key) and per-auth HTTP transport (proxy) from context.
 type OpenAICompatExecutor struct {
-	provider              string
-	cfg                   *config.Config
-	upstreamFormat        sdktranslator.Format
-	upstreamModel         string
-	requireStreamTerminal bool
+	provider                 string
+	cfg                      *config.Config
+	upstreamFormat           sdktranslator.Format
+	upstreamModel            string
+	requireStreamTerminal    bool
+	normalizeResponseItemIDs bool
 }
 
 // NewOpenAICompatExecutor creates an executor bound to a provider key (e.g., "openrouter").
@@ -441,6 +442,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
 		var param any
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, &param)
+		var responseItemIDs helps.ResponsesItemIDs
 		var streamUsage helps.StreamUsageBuffer
 		var seenDone bool
 		var seenFinishReason bool
@@ -513,6 +515,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 
 			if to == sdktranslator.FormatOpenAIResponse && !isDone {
+				if e.normalizeResponseItemIDs {
+					dataPayload = responseItemIDs.Normalize(dataPayload)
+				}
 				streamUsage.Observe(helps.ParseCodexUsage(dataPayload))
 			}
 			eventType := gjson.GetBytes(dataPayload, "type").String()

@@ -217,6 +217,11 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		usageStore := copilotusage.NewStore(filepath.Join(filepath.Dir(configFilePath), "copilot-usage.jsonl"))
 		s.mgmt.SetCopilotUsageStore(usageStore)
 		coreusage.RegisterNamedPlugin("copilot-history", usageStore)
+		go func() {
+			if errRefresh := usageStore.RefreshPricing(context.Background()); errRefresh != nil {
+				log.WithError(errRefresh).Warn("github-copilot: startup pricing refresh failed; keeping cached prices")
+			}
+		}()
 	}
 	s.mgmt.SetPluginHost(optionState.pluginHost)
 	s.mgmt.SetConfigReloadHook(optionState.configReloadHook)

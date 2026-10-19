@@ -36,6 +36,10 @@ func TestStorePersistsCopilotUsageByModel(t *testing.T) {
 func TestStoreAggregatesPricedUsageAcrossDays(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "copilot-usage.jsonl")
 	store := NewStore(path)
+	store.pricing.data = catalogData{UpdatedAt: time.Now().UTC(), Rates: testRates(t)}
+	if err := store.pricing.save(store.pricing.data); err != nil {
+		t.Fatal(err)
+	}
 	first := time.Date(2026, time.October, 2, 12, 0, 0, 0, time.UTC)
 	for _, at := range []time.Time{first, first.AddDate(0, 0, 1)} {
 		store.HandleUsage(context.Background(), usage.Record{

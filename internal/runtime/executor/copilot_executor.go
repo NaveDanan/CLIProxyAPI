@@ -105,7 +105,7 @@ func (e *CopilotExecutor) delegate(auth *coreauth.Auth, req exec.Request, opts e
 		}
 		return delegate
 	}
-	return &OpenAICompatExecutor{provider: copilot.Provider, cfg: e.cfg, upstreamFormat: format, upstreamModel: upstreamModel, requireStreamTerminal: true}
+	return &OpenAICompatExecutor{provider: copilot.Provider, cfg: e.cfg, upstreamFormat: format, upstreamModel: upstreamModel, requireStreamTerminal: true, normalizeResponseItemIDs: true}
 }
 
 func (e *CopilotExecutor) Execute(ctx context.Context, auth *coreauth.Auth, req exec.Request, opts exec.Options) (exec.Response, error) {
