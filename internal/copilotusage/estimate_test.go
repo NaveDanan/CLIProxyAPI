@@ -2,12 +2,15 @@ package copilotusage
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/copilot"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 )
@@ -107,6 +110,10 @@ func TestDashboardSplitsProvidersHarnessesAndBuckets(t *testing.T) {
 	store.HandleUsage(context.Background(), usage.Record{Provider: "codex", Model: "gpt-6-luna", SessionID: "codex:thread-1", RequestedAt: day.Add(26 * time.Hour), Detail: detail})
 	store.HandleUsage(claude, usage.Record{Provider: "github-copilot", Model: "claude-sonnet-4.6", RequestedAt: day.Add(49 * time.Hour), Detail: detail})
 
+	models := registry.GetGlobalRegistry()
+	models.RegisterClient("dashboard-test-copilot", copilot.Provider, []*registry.ModelInfo{{ID: "gpt-6-luna", DisplayName: "GPT-6 Luna", InputTokenLimit: 1000000}})
+	defer models.UnregisterClient("dashboard-test-copilot")
+
 	dashboard, err := NewStore(path).Dashboard([]time.Time{day, day.Add(24 * time.Hour), day.Add(48 * time.Hour)})
 	if err != nil {
 		t.Fatal(err)
@@ -126,6 +133,29 @@ func TestDashboardSplitsProvidersHarnessesAndBuckets(t *testing.T) {
 	if codexUsage.Provider != "codex" || codexUsage.Series[0].Harness != harnessCodex ||
 		len(codexUsage.Buckets[0]) != 0 || codexUsage.Buckets[1][0].Requests != 1 {
 		t.Fatalf("unexpected Codex usage: %+v", codexUsage)
+	}
+	encoded, err := json.Marshal(dashboard.Rates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rates map[string]struct {
+		Input       float64 `json:"input"`
+		Category    string  `json:"category"`
+		Threshold   int64   `json:"threshold"`
+		Name        string  `json:"name"`
+		Prompt      int64   `json:"prompt_tokens"`
+		LongContext *struct {
+			Input float64 `json:"input"`
+		} `json:"long_context"`
+	}
+	if err := json.Unmarshal(encoded, &rates); err != nil {
+		t.Fatal(err)
+	}
+	sonnet, luna := rates["claude-sonnet-4.6"], rates["gpt-6-luna"]
+	if len(rates) != 2 || sonnet.Input != 3 || sonnet.Category != "Versatile" || sonnet.LongContext != nil || sonnet.Prompt != 0 ||
+		luna.Input != .1 || luna.Threshold != 272000 || luna.LongContext == nil || luna.LongContext.Input != .2 ||
+		luna.Name != "GPT-6 Luna" || luna.Prompt != 1000000 {
+		t.Fatalf("unexpected dashboard rates: %s", encoded)
 	}
 
 	summary, err := NewStore(path).Summary(day, day.Add(48*time.Hour))

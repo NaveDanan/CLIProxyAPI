@@ -2,8 +2,12 @@ package copilotusage
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/copilot"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 
 // Totals summarizes requests, tokens and their estimated USD cost at the
@@ -79,11 +83,37 @@ type ProviderUsage struct {
 	Buckets [][]BucketPoint `json:"buckets"`
 }
 
+// ModelPricing is a model's published rates. Name and PromptTokens come from
+// GitHub Copilot's model list when the model is registered there.
+type ModelPricing struct {
+	rate
+	Name         string `json:"name,omitempty"`
+	PromptTokens int    `json:"prompt_tokens,omitempty"`
+}
+
 type Dashboard struct {
 	Start     time.Time       `json:"start"`
 	End       time.Time       `json:"end"`
 	Pricing   PricingStatus   `json:"pricing"`
 	Providers []ProviderUsage `json:"providers"`
+	// Rates holds the pricing of each listed model, keyed by its series name.
+	Rates map[string]ModelPricing `json:"rates"`
+}
+
+func modelPricing(model string, pricing rate) ModelPricing {
+	result := ModelPricing{rate: pricing}
+	models := registry.GetGlobalRegistry()
+	if !slices.Contains(models.GetModelProviders(model), copilot.Provider) {
+		return result
+	}
+	if info := models.GetModelInfo(model, copilot.Provider); info != nil {
+		result.Name = info.DisplayName
+		result.PromptTokens = info.InputTokenLimit
+		if result.PromptTokens == 0 {
+			result.PromptTokens = info.ContextLength
+		}
+	}
+	return result
 }
 
 type providerAccumulator struct {
@@ -104,7 +134,8 @@ func (s *Store) Dashboard(boundaries []time.Time) (Dashboard, error) {
 		}
 	}
 	start, end, buckets := boundaries[0], boundaries[len(boundaries)-1], len(boundaries)-1
-	result := Dashboard{Start: start.UTC(), End: end.UTC(), Providers: []ProviderUsage{}}
+	result := Dashboard{Start: start.UTC(), End: end.UTC(), Providers: []ProviderUsage{}, Rates: map[string]ModelPricing{}}
+	rates, _ := s.pricing.snapshot()
 	providers := make(map[string]*providerAccumulator)
 	status, err := s.scan(func(event Event, priced pricedEvent) {
 		if event.At.Before(start) || !event.At.Before(end) {
@@ -157,6 +188,14 @@ func (s *Store) Dashboard(boundaries []time.Time) (Dashboard, error) {
 			})
 		}
 		result.Providers = append(result.Providers, provider.usage)
+		for _, series := range provider.usage.Series {
+			if _, found := result.Rates[series.Model]; found {
+				continue
+			}
+			if pricing, found := rates[modelKey(series.Model)]; found {
+				result.Rates[series.Model] = modelPricing(series.Model, pricing)
+			}
+		}
 	}
 	sort.Slice(result.Providers, func(i, j int) bool {
 		left, right := result.Providers[i], result.Providers[j]

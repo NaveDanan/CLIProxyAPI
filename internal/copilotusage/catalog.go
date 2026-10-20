@@ -227,7 +227,7 @@ func parsePricingTable(table *html.Node, rates map[string]rate) error {
 		if model == "" {
 			return fmt.Errorf("Copilot pricing row is missing its model")
 		}
-		r := rate{}
+		r := rate{Category: get("category")}
 		for name, target := range map[string]*float64{"input": &r.Input, "cached input": &r.Cached, "cache write": &r.Write, "output": &r.Output} {
 			value := get(name)
 			if name == "cache write" && (value == "" || strings.EqualFold(value, "Not applicable")) {

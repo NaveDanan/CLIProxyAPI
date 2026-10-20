@@ -11,12 +11,14 @@ import (
 
 // Rates are USD per million tokens, as published by GitHub.
 type rate struct {
-	Input       float64 `json:"input"`
-	Cached      float64 `json:"cached"`
-	Write       float64 `json:"write"`
-	Output      float64 `json:"output"`
-	Threshold   int64   `json:"threshold,omitempty"`
-	LongContext *rate   `json:"long_context,omitempty"`
+	Input  float64 `json:"input"`
+	Cached float64 `json:"cached"`
+	Write  float64 `json:"write"`
+	Output float64 `json:"output"`
+	// Category is the GitHub cost group, such as Lightweight or Powerful.
+	Category    string `json:"category,omitempty"`
+	Threshold   int64  `json:"threshold,omitempty"`
+	LongContext *rate  `json:"long_context,omitempty"`
 }
 
 // Upstream snapshot IDs such as claude-haiku-4-5-20251001 share the base model price.
