@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -45,6 +46,44 @@ func TestGetCopilotUsageRejectsInvalidRange(t *testing.T) {
 		ctx, _ := gin.CreateTestContext(rec)
 		ctx.Request = httptest.NewRequest(http.MethodGet, "/v8/management/observability/usage/copilot?"+query, nil)
 		(&Handler{copilotUsage: copilotusage.NewStore(filepath.Join(t.TempDir(), "usage.jsonl"))}).GetCopilotUsage(ctx)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("query %q returned %d", query, rec.Code)
+		}
+	}
+}
+
+func TestGetUsageDashboardBucketsEveryProvider(t *testing.T) {
+	store := copilotusage.NewStore(filepath.Join(t.TempDir(), "usage.jsonl"))
+	day := time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)
+	for _, provider := range []string{"github-copilot", "codex"} {
+		store.HandleUsage(context.Background(), usage.Record{
+			Provider: provider, Model: "gpt-5.4", RequestedAt: day.Add(time.Hour),
+			Detail: usage.Detail{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+		})
+	}
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v8/management/observability/usage/dashboard?boundaries="+
+		strconv.FormatInt(day.UnixMilli(), 10)+","+strconv.FormatInt(day.Add(24*time.Hour).UnixMilli(), 10), nil)
+	(&Handler{copilotUsage: store}).GetUsageDashboard(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var dashboard copilotusage.Dashboard
+	if err := json.Unmarshal(rec.Body.Bytes(), &dashboard); err != nil {
+		t.Fatal(err)
+	}
+	if len(dashboard.Providers) != 2 || len(dashboard.Providers[0].Buckets) != 1 {
+		t.Fatalf("unexpected dashboard: %+v", dashboard)
+	}
+}
+
+func TestGetUsageDashboardRejectsInvalidBoundaries(t *testing.T) {
+	for _, query := range []string{"", "boundaries=5", "boundaries=5,4", "boundaries=5,x"} {
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/v8/management/observability/usage/dashboard?"+query, nil)
+		(&Handler{copilotUsage: copilotusage.NewStore(filepath.Join(t.TempDir(), "usage.jsonl"))}).GetUsageDashboard(ctx)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("query %q returned %d", query, rec.Code)
 		}

@@ -33,6 +33,91 @@ func newTestCopilot() (*CopilotExecutor, *coreauth.Auth) {
 	return e, auth
 }
 
+func TestCopilotNativePromptPrefixAndCacheContinuity(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		endpoint string
+		format   translator.Format
+		payload  string
+		response string
+		paths    []string
+	}{
+		{
+			name: "codex", endpoint: "/responses", format: translator.FormatOpenAIResponse,
+			payload:  `{"model":"audit-model","stream":true,"instructions":"Keep the original task and do not repeat completed work.","prompt_cache_key":"stable-conversation-key","input":[{"role":"user","content":"Inspect the configuration without deploying."}],"tools":[{"type":"function","name":"inspect","parameters":{"type":"object","properties":{}}}]}`,
+			response: "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-audit\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":1,\"total_tokens\":11}}}\n\n",
+			paths:    []string{"instructions", "prompt_cache_key", "input", "tools"},
+		},
+		{
+			name: "claude", endpoint: "/v1/messages", format: translator.FormatClaude,
+			payload:  `{"model":"audit-model","stream":true,"max_tokens":64,"system":[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude.","cache_control":{"type":"ephemeral"}}],"metadata":{"user_id":"user_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef_account__session_11111111-1111-4111-8111-111111111111"},"messages":[{"role":"user","content":[{"type":"text","text":"Inspect the configuration without deploying.","cache_control":{"type":"ephemeral"}}]}],"tools":[{"name":"inspect","input_schema":{"type":"object","properties":{}},"cache_control":{"type":"ephemeral"}}]}`,
+			response: "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-audit\",\"role\":\"assistant\",\"model\":\"audit-model\",\"content\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+			paths:    []string{"system", "metadata.user_id", "messages", "tools"},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			executor, auth := newTestCopilot()
+			registry.GetGlobalRegistry().RegisterClient(auth.ID, copilot.Provider, []*registry.ModelInfo{{ID: "audit-model", UpstreamEndpoint: testCase.endpoint}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+			requests := 0
+			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", copilotRoundTripper(func(request *http.Request) (*http.Response, error) {
+				requests++
+				if request.URL.Path != testCase.endpoint {
+					t.Errorf("endpoint = %q, want %q", request.URL.Path, testCase.endpoint)
+				}
+				body, err := io.ReadAll(request.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, field := range testCase.paths {
+					if !reflect.DeepEqual(gjson.GetBytes(body, field).Value(), gjson.Get(testCase.payload, field).Value()) {
+						t.Errorf("request %d changed caller-owned %s", requests, field)
+					}
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(testCase.response))}, nil
+			}))
+			payload := []byte(testCase.payload)
+			headers := http.Header{"User-Agent": {"claude-cli/2.1.0 (external, cli)"}, "X-App": {"cli"}}
+			for turn := 0; turn < 2; turn++ {
+				stream, err := executor.ExecuteStream(ctx, auth, exec.Request{Model: "audit-model", Payload: payload}, exec.Options{SourceFormat: testCase.format, OriginalRequest: payload, Headers: headers, Stream: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				for chunk := range stream.Chunks {
+					if chunk.Err != nil {
+						t.Fatal(chunk.Err)
+					}
+				}
+			}
+			if requests != 2 {
+				t.Fatalf("upstream requests = %d, want 2", requests)
+			}
+		})
+	}
+}
+
+func TestCopilotCompactRejectsBeforeCredentialAcquisition(t *testing.T) {
+	executor, auth := newTestCopilot()
+	tokenCalls := 0
+	executor.tokenSource = func(context.Context, *coreauth.Auth, bool) (copilot.Token, error) {
+		tokenCalls++
+		return copilot.Token{}, fmt.Errorf("unexpected credential acquisition")
+	}
+	request := exec.Request{Model: "audit-model", Payload: []byte(`{"model":"audit-model","input":"history"}`)}
+	options := exec.Options{SourceFormat: translator.FormatOpenAIResponse, Alt: "responses/compact"}
+	_, executeErr := executor.Execute(context.Background(), auth, request, options)
+	_, streamErr := executor.ExecuteStream(context.Background(), auth, request, options)
+	for _, err := range []error{executeErr, streamErr} {
+		status, ok := err.(interface{ StatusCode() int })
+		if !ok || status.StatusCode() != http.StatusNotImplemented {
+			t.Fatalf("compact error = %v, want HTTP 501", err)
+		}
+	}
+	if tokenCalls != 0 {
+		t.Fatalf("credential acquisitions = %d, want 0", tokenCalls)
+	}
+}
+
 func TestCopilotProtocolRoutingAndCredentialIsolation(t *testing.T) {
 	for _, tc := range []struct {
 		endpoint          string

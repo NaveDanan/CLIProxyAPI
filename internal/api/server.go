@@ -214,6 +214,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Initialize management handler
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	if configFilePath != "" {
+		// The file name predates multi-provider history and is kept so saved usage stays readable.
 		usageStore := copilotusage.NewStore(filepath.Join(filepath.Dir(configFilePath), "copilot-usage.jsonl"))
 		s.mgmt.SetCopilotUsageStore(usageStore)
 		coreusage.RegisterNamedPlugin("copilot-history", usageStore)

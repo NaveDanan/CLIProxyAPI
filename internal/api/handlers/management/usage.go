@@ -98,3 +98,40 @@ func (h *Handler) GetCopilotUsage(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, summary)
 }
+
+// maxUsageBuckets covers a year of daily buckets.
+const maxUsageBuckets = 400
+
+// GetUsageDashboard returns usage for every provider, split into the time
+// buckets bounded by the ascending Unix-millisecond list in "boundaries".
+func (h *Handler) GetUsageDashboard(c *gin.Context) {
+	if h == nil || h.copilotUsage == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "usage history is unavailable"})
+		return
+	}
+	parts := strings.Split(c.Query("boundaries"), ",")
+	if len(parts) < 2 || len(parts) > maxUsageBuckets+1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "boundaries must list between 2 and 401 Unix millisecond times"})
+		return
+	}
+	boundaries := make([]time.Time, 0, len(parts))
+	for _, part := range parts {
+		millis, errParse := strconv.ParseInt(strings.TrimSpace(part), 10, 64)
+		if errParse != nil || (len(boundaries) > 0 && millis <= boundaries[len(boundaries)-1].UnixMilli()) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "boundaries must be increasing Unix millisecond times"})
+			return
+		}
+		boundaries = append(boundaries, time.UnixMilli(millis).UTC())
+	}
+	if c.Query("refresh_pricing") == "true" {
+		if errRefresh := h.copilotUsage.RefreshPricing(c.Request.Context()); errRefresh != nil {
+			log.WithError(errRefresh).Warn("usage dashboard: pricing refresh failed; keeping cached prices")
+		}
+	}
+	dashboard, err := h.copilotUsage.Dashboard(boundaries)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read usage history"})
+		return
+	}
+	c.JSON(http.StatusOK, dashboard)
+}

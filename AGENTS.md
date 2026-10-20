@@ -60,3 +60,10 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - Avoid wall-clock `time.Sleep` in TTL, expiration, ordering, or cache-eviction unit tests due to platform timer granularity (e.g. Windows default timer resolution of ~15.6ms) and CI jitter under load; prefer controllable clocks (`nowFunc` / mock clock), explicit timestamp manipulation, or deterministic synchronization primitives.
 - Note: if modifying features that involve CLIProxyAPIHome, check if corresponding updates are needed in the CLIProxyAPIHome repository.
 - Endpoints under the `/v0/management` base URL are deprecated and no longer maintained. For any feature changes, do not modify endpoints under `/v0/management` unless necessary to fix compilation errors.
+
+## Release Artifacts and Cleanup
+
+- Put completed release and installer artifacts in the project `dist/` directory; subdirectories are fine. Do not create an empty `dist/` solely for this guidance.
+- After a successful validated build, keep the newest executable for each distinct shipped tool or variant and the two newest installers per product and platform.
+- Preserve complete runtime bundles and all inputs, models, source files, and credentials. Compiler intermediates may be stored outside `dist/`.
+- Before moving or deleting an output, resolve its absolute path, keep it inside this project, reject symlinks and junctions, and check active process use where applicable. Record exact paths, byte counts, and reasons.

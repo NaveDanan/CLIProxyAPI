@@ -14,12 +14,18 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/copilot"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
 
+// Event is one saved request. The history began as Copilot-only, so events
+// without a provider belong to GitHub Copilot and events without a harness
+// predate harness tracking.
 type Event struct {
 	At             time.Time            `json:"at"`
+	Provider       string               `json:"provider,omitempty"`
+	Harness        string               `json:"harness,omitempty"`
 	Model          string               `json:"model"`
 	InputTokens    int64                `json:"input_tokens"`
 	OutputTokens   int64                `json:"output_tokens"`
@@ -27,6 +33,13 @@ type Event struct {
 	Failed         bool                 `json:"failed"`
 	CostNanos      *int64               `json:"cost_nanos,omitempty"`
 	TokenBreakdown usage.TokenBreakdown `json:"token_breakdown,omitempty"`
+}
+
+func eventProvider(event Event) string {
+	if event.Provider == "" {
+		return copilot.Provider
+	}
+	return event.Provider
 }
 
 type ModelSummary struct {
@@ -38,6 +51,7 @@ type ModelSummary struct {
 	CostUSD      float64 `json:"cost_usd"`
 	AICredits    float64 `json:"ai_credits"`
 	Unpriced     int64   `json:"unpriced_requests"`
+	Estimated    int64   `json:"estimated_requests"`
 	costNanos    int64
 }
 
@@ -64,8 +78,11 @@ func NewStore(path string) *Store {
 	return &Store{path: path, pricing: newPricingCatalog(path + ".pricing.json")}
 }
 
-func (s *Store) HandleUsage(_ context.Context, record usage.Record) {
-	if s == nil || record.Provider != copilot.Provider || !usage.GenerateEnabled(record.Generate) {
+// HandleUsage saves generated requests from every provider with the harness
+// that sent them, so the dashboard can compare providers side by side.
+func (s *Store) HandleUsage(ctx context.Context, record usage.Record) {
+	provider := strings.TrimSpace(record.Provider)
+	if s == nil || provider == "" || !usage.GenerateEnabled(record.Generate) {
 		return
 	}
 	model := strings.TrimSpace(record.ResponseModel)
@@ -80,14 +97,14 @@ func (s *Store) HandleUsage(_ context.Context, record usage.Record) {
 		at = time.Now()
 	}
 	event := Event{
-		At: at.UTC(), Model: model, InputTokens: record.Detail.InputTokens,
-		OutputTokens: record.Detail.OutputTokens, TotalTokens: record.Detail.TotalTokens,
-		Failed: record.Failed, TokenBreakdown: record.Detail.TokenBreakdown,
+		At: at.UTC(), Provider: provider, Harness: detectHarness(logging.GetClientRequestMetadata(ctx).UserAgent, record.SessionID),
+		Model: model, InputTokens: record.Detail.InputTokens, OutputTokens: record.Detail.OutputTokens,
+		TotalTokens: record.Detail.TotalTokens, Failed: record.Failed, TokenBreakdown: record.Detail.TokenBreakdown,
 	}
 	rates, _ := s.pricing.snapshot()
 	event.CostNanos = estimatedCost(rates, model, record.Detail)
 	if err := s.append(event); err != nil {
-		log.WithError(err).Error("github-copilot: failed to save usage")
+		log.WithError(err).Error("usage history: failed to save usage")
 	}
 }
 
@@ -103,7 +120,7 @@ func (s *Store) append(event Event) error {
 	}
 	defer func() {
 		if errClose := file.Close(); errClose != nil {
-			log.WithError(errClose).Error("github-copilot: failed to close usage history")
+			log.WithError(errClose).Error("usage history: failed to close usage history")
 		}
 	}()
 	if err := json.NewEncoder(file).Encode(event); err != nil {
@@ -112,52 +129,59 @@ func (s *Store) append(event Event) error {
 	return nil
 }
 
+// scan prices every saved event in file order. Events before a requested
+// range still pass through, because older records are estimated from the
+// requests just before them.
+func (s *Store) scan(visit func(Event, pricedEvent)) (PricingStatus, error) {
+	rates, status := s.pricing.snapshot()
+	estimate := newEstimator(rates)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	file, err := os.Open(s.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return status, nil
+	}
+	if err != nil {
+		return status, fmt.Errorf("open usage history: %w", err)
+	}
+	defer func() {
+		if errClose := file.Close(); errClose != nil {
+			log.WithError(errClose).Error("usage history: failed to close usage history")
+		}
+	}()
+	decoder := json.NewDecoder(file)
+	for {
+		var event Event
+		if err := decoder.Decode(&event); errors.Is(err, io.EOF) {
+			return status, nil
+		} else if err != nil {
+			return status, fmt.Errorf("read usage history: %w", err)
+		}
+		visit(event, estimate.price(event))
+	}
+}
+
 func (s *Store) Summary(start, end time.Time) (Summary, error) {
 	result := Summary{Start: start.UTC(), End: end.UTC(), ByModel: []ModelSummary{}, Days: []Day{}}
 	if s == nil || !start.Before(end) {
 		return result, fmt.Errorf("usage range must have start before end")
 	}
-	rates, status := s.pricing.snapshot()
-	result.Pricing = status
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	file, err := os.Open(s.path)
-	if errors.Is(err, os.ErrNotExist) {
-		return result, nil
-	}
-	if err != nil {
-		return result, fmt.Errorf("open usage history: %w", err)
-	}
-	defer func() {
-		if errClose := file.Close(); errClose != nil {
-			log.WithError(errClose).Error("github-copilot: failed to close usage history")
-		}
-	}()
 	models := make(map[string]ModelSummary)
 	days := make(map[string]map[string]ModelSummary)
-	decoder := json.NewDecoder(file)
-	for {
-		var event Event
-		if err := decoder.Decode(&event); errors.Is(err, io.EOF) {
-			break
-		} else if err != nil {
-			return result, fmt.Errorf("read usage history: %w", err)
+	status, err := s.scan(func(event Event, priced pricedEvent) {
+		if eventProvider(event) != copilot.Provider || event.At.Before(start) || !event.At.Before(end) {
+			return
 		}
-		if event.At.Before(start) || !event.At.Before(end) {
-			continue
-		}
-		// New records retain cache buckets so every refresh can reprice history.
-		// Legacy records keep their recorded estimate when cache details are absent.
-		if event.TokenBreakdown.SchemaVersion != 0 {
-			event.CostNanos = estimatedCost(rates, event.Model, usage.Detail{TotalTokens: event.TotalTokens, TokenBreakdown: event.TokenBreakdown})
-		}
-		model := models[event.Model]
-		models[event.Model] = add(model, event)
+		models[event.Model] = add(models[event.Model], event, priced)
 		date := event.At.UTC().Format("2006-01-02")
 		if days[date] == nil {
 			days[date] = make(map[string]ModelSummary)
 		}
-		days[date][event.Model] = add(days[date][event.Model], event)
+		days[date][event.Model] = add(days[date][event.Model], event, priced)
+	})
+	result.Pricing = status
+	if err != nil {
+		return result, err
 	}
 	result.ByModel = sortedModels(models)
 	for date, dayModels := range days {
@@ -167,19 +191,22 @@ func (s *Store) Summary(start, end time.Time) (Summary, error) {
 	return result, nil
 }
 
-func add(model ModelSummary, event Event) ModelSummary {
+func add(model ModelSummary, event Event, priced pricedEvent) ModelSummary {
 	model.Model = event.Model
 	model.Requests++
 	model.InputTokens += event.InputTokens
 	model.OutputTokens += event.OutputTokens
 	model.TotalTokens += event.TotalTokens
-	if event.CostNanos == nil {
+	if !priced.priced {
 		model.Unpriced++
-	} else {
-		model.costNanos += *event.CostNanos
-		model.CostUSD = float64(model.costNanos) / 1_000_000_000
-		model.AICredits = float64(model.costNanos) / 10_000_000
+		return model
 	}
+	if priced.estimated {
+		model.Estimated++
+	}
+	model.costNanos += priced.cost.total()
+	model.CostUSD = float64(model.costNanos) / 1_000_000_000
+	model.AICredits = float64(model.costNanos) / 10_000_000
 	return model
 }
 

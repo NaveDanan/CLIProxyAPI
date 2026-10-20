@@ -115,7 +115,7 @@ func TestPricingHaiku45CreditConversion(t *testing.T) {
 		if cost == nil {
 			t.Fatal("Haiku 4.5 is unpriced")
 		}
-		result := add(ModelSummary{}, Event{CostNanos: cost})
+		result := add(ModelSummary{}, Event{}, pricedEvent{priced: true, cost: costSplit{Other: *cost}})
 		if result.AICredits != bucket.credits {
 			t.Fatalf("credits = %v, want %v", result.AICredits, bucket.credits)
 		}

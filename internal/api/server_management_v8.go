@@ -40,6 +40,7 @@ func (s *Server) registerManagementV8Routes() {
 	v8.GET("/observability/usage/api-keys", s.mgmt.GetAPIKeyUsage)
 	v8.GET("/observability/usage/queue", s.mgmt.GetUsageQueue)
 	v8.GET("/observability/usage/copilot", s.mgmt.GetCopilotUsage)
+	v8.GET("/observability/usage/dashboard", s.mgmt.GetUsageDashboard)
 
 	v8.GET("/credentials", s.mgmt.ListAuthFiles)
 	v8.POST("/credentials", s.mgmt.UploadAuthFile)
