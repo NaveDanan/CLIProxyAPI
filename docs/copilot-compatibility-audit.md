@@ -67,9 +67,23 @@ Codex setup uses the HTTP Responses wire protocol and a local `model_catalog_jso
 
 Desktop configuration also now reads the API key from v8's `access.api-keys`, with the legacy root key as a fallback. File merging, backups, and rollback remain covered by the existing desktop tests.
 
+## Codex compaction follow-up, 2026-10-25
+
+The Codex 0.164.0 session logs corresponding to T3 threads `08107e46-7d82-4fa8-90f1-bee59e1f26fc` and `85e45f46-f626-406b-9de1-d46aa3b702f1` contain 51 and 31 compactions, respectively. Median intervals were about 89 and 102 seconds. Their unrelated final failures were excluded from this diagnosis. Both sessions carried tool-declaration records of 879,583 characters. The first model requests already used 215,732 and 222,598 input tokens, and the first requests after compaction still used 218,599 and 222,447. Codex reported a usable context of 258,400 tokens.
+
+CPA cleared `supports_search_tool` for every non-Codex provider. That field controls client-executed tool discovery, including whether Codex defers MCP and connector definitions. It does not describe hosted web search. Clearing it caused Codex to include the full tool catalog in its code-mode instructions on every request. [OpenAI's tool search documentation](https://developers.openai.com/api/docs/guides/tools-tool-search) explains deferred loading and the client-executed discovery round trip.
+
+An authenticated request through the installed CPA confirmed that Copilot's Responses route accepts a client-executed `tool_search` declaration and returns `tool_search_call`. Discovery is now preserved for a template-supported model only when every registered route uses native Codex or Copilot Responses. Missing endpoint metadata, Chat Completions, Messages, unknown models, and incompatible mixed routes remain conservative. Web search, WebSocket, and service-tier capabilities remain separate.
+
+The account's live model discovery reported a 400,000-token total context, a 272,000-token prompt limit, and a 128,000-token output limit. Increasing the prompt budget beyond the upstream limit is not the fix. Desktop setup instead preserves connectors when all selected models can defer tools, and removes its earlier connector-disabling setting only when CPA owns it.
+
+Regression coverage exercises the public catalog builder with supported, prefixed, unknown, and mixed-account routes, the discovery and loaded-function round trip through both streaming and non-streaming Copilot executors, and desktop configuration migration and user-setting preservation. Updating source or rebuilding alone does not change the already-running installed proxy. It must run the updated backend, and clients using a saved catalog must refresh and apply their CLI settings and restart Codex/T3 sessions.
+
+The real Codex 0.164.0 smoke test uses a mock inference server and an isolated MCP server with 80 large tool definitions. Changing only the catalog's discovery flag reduced the first serialized request from 699,008 to 70,547 bytes, about 90%. In both cases Codex discovered and executed the requested MCP tool. Run it from `desktop` with `node test/codex-tool-discovery.smoke.cjs /absolute/path/to/codex`. It uses no real inference credentials. A separate isolated instance of the rebuilt backend advertised discovery for the account's four GPT-6 models and completed an authenticated Copilot discovery-to-function-call round trip. These checks establish the capability fix and request-size reduction, not a long-running post-update compaction rate.
+
 ## Remaining limits
 
-- **No live end-to-end confirmation.** No authenticated inference calls, real CLI sessions, or historical failing-thread traces were used. A live tool-use conversation in each CLI remains necessary to measure account-specific compatibility and actual disconnect frequency.
+- **The original interruption audit had no live confirmation.** Its completion and disconnect conclusions were based on fixtures. The compaction follow-up above used historical Codex sessions and an authenticated tool-discovery probe; it does not establish actual disconnect frequency or a long-running post-update compaction rate.
 - **Chat fallback translates native features.** Messages tools/thinking and Responses items are not identical to Chat Completions. The fixtures cover the tested tool and terminal paths; they do not establish support for every Claude beta, native thinking signature, document feature, or Codex extension.
 - **Unsupported endpoint classes remain explicit.** Copilot inference rejects Responses compaction and image-generation endpoints. Models that advertise only unsupported endpoints are not registered. This provider uses HTTP executors rather than the dedicated native Codex WebSocket executor.
 - **Token counting is an estimate.** Copilot's `CountTokens` uses the generic local compatibility path, not an authoritative Anthropic token-counting endpoint.

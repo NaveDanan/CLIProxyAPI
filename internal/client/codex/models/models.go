@@ -548,7 +548,10 @@ func applyCodexClientProviderCapabilities(entry map[string]any, id string, isTem
 		return
 	}
 	if providersForModel != nil && !isPureCodexProvider(id, providersForModel) {
-		entry["supports_search_tool"] = false
+		// This flag controls client-side tool discovery, not hosted web search.
+		// Disabling it makes Codex eagerly load every MCP/app tool definition.
+		supportsSearch, _ := entry["supports_search_tool"].(bool)
+		entry["supports_search_tool"] = supportsSearch && registry.GetGlobalRegistry().SupportsClientToolSearch(id)
 		entry["prefer_websockets"] = false
 		entry["service_tiers"] = []any{}
 		nullCodexClientRequiredOptions(entry)
